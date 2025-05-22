@@ -66,7 +66,7 @@ SYSTEM_MESSAGE = {
 class URController:
     def __init__(self):
         """Initialize connection to the UR robot"""
-        self.ROBOT_IP = '169.254.200.239'
+        self.ROBOT_IP =  '169.254.200.239'
         
         # Initialize robot connection
         logging.info("Initializing UR Robot")
