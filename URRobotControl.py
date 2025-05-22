@@ -15,6 +15,7 @@ class URRobotControl:
     - Getting the current TCP pose (position and orientation)
     - Controlling robot movements (MoveJ, MoveL, MoveP)
     - Individual joint control
+    - Gripper control
     """
     
     def __init__(self, host, log_path="ur_log/", log_config_path=None, has_force_torque=False):
@@ -31,6 +32,12 @@ class URRobotControl:
         self.robot_model = RobotModel(log_path=log_path, log_config_path=log_config_path)
         self.ur_script = UrScript(host, self.robot_model, hasForceTorque=has_force_torque)
         self.connection_state = ConnectionState.DISCONNECTED
+        
+        # Default gripper digital output pins
+        self.GRIPPER_DO = {
+            "XL_kep": 1,  # close solenoid (pin 1)
+            "XL_nha": 2,  # open solenoid (pin 2)
+        }
         
     def connect(self):
         """
@@ -241,7 +248,11 @@ class URRobotControl:
         Returns:
             bool: True if a program is running
         """
-        return self.robot_model.RuntimeState()
+        runtime_state = self.robot_model.RuntimeState()
+        # Convert numpy array to a simple boolean
+        if isinstance(runtime_state, np.ndarray):
+            return bool(runtime_state.any())
+        return bool(runtime_state)
     
     def stop(self):
         """
@@ -306,6 +317,66 @@ class URRobotControl:
                  and tx, ty, tz are torques in Nm
         """
         return self.robot_model.ActualTCPForce()
+    
+    # Gripper control methods based on test_gripper.py
+    
+    def pulse_output(self, name, duration=0.5):
+        """
+        Pulse the named gripper output True for 'duration' seconds,
+        then switch it off again.
+        
+        Args:
+            name (str): Gripper name ("XL_kep" for close, "XL_nha" for open)
+            duration (float): Duration in seconds to pulse the output
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            pin = self.GRIPPER_DO[name]
+            self.ur_script.set_standard_digital_out(pin, True)
+            time.sleep(duration)
+            self.ur_script.set_standard_digital_out(pin, False)
+            return True
+        except Exception as e:
+            print(f"Pulse output error: {e}")
+            return False
+    
+    def close_gripper(self, duration=0.5):
+        """
+        Close the gripper by pulsing the close solenoid.
+        
+        Args:
+            duration (float): Duration of the pulse in seconds
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            # Ensure the opposite is off first
+            self.ur_script.set_standard_digital_out(self.GRIPPER_DO["XL_nha"], False)
+            return self.pulse_output("XL_kep", duration)
+        except Exception as e:
+            print(f"Close gripper error: {e}")
+            return False
+    
+    def open_gripper(self, duration=0.5):
+        """
+        Open the gripper by pulsing the open solenoid.
+        
+        Args:
+            duration (float): Duration of the pulse in seconds
+            
+        Returns:
+            bool: True if successful
+        """
+        try:
+            # Ensure the opposite is off first
+            self.ur_script.set_standard_digital_out(self.GRIPPER_DO["XL_kep"], False)
+            return self.pulse_output("XL_nha", duration)
+        except Exception as e:
+            print(f"Open gripper error: {e}")
+            return False
     
     def get_status(self):
         """
