@@ -2,8 +2,11 @@ import time
 import os
 import json
 import asyncio
+import sys
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+# Add the parent directory to Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src import UR
 import logging
 

@@ -8,6 +8,8 @@ from src import UR
 import numpy as np
 import logging
 import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from voice_handler import VoiceHandler
 from functools import lru_cache
 from PyQt6.QtWidgets import QApplication
