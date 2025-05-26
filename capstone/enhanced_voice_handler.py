@@ -19,51 +19,38 @@ class EnhancedVoiceHandler(VoiceHandler):
     """
     Enhanced Voice Handler with industrial noise suppression capabilities.
     Extends the base VoiceHandler to add noise filtering for pneumatic machines
-    and air compressor environments.
+    and air compressor environments using RNNoise.
     """
     def __init__(self):
         # Initialize the parent VoiceHandler
         super().__init__()
         
-        # Initialize the noise suppressor
+        # Initialize the noise suppressor with 48kHz sample rate
+        self.sample_rate = 48000  # Update to 48kHz for RNNoise
+        self.chunk_size = 480     # 10ms chunks at 48kHz
+        
         self.noise_suppressor = IndustrialNoiseSuppressor(
             sample_rate=self.sample_rate,
             chunk_size=self.chunk_size
         )
         
-        # Flag for if calibration has been performed
-        self.is_calibrated = False
-        
-        logging.info("Enhanced Voice Handler with noise suppression initialized")
+        logging.info("Enhanced Voice Handler with RNNoise suppression initialized")
     
-    def calibrate_noise_profile(self, duration=5):
-        """
-        Record ambient noise to build a suppression profile.
-        This should be done when only background industrial noise is present.
-        """
-        print(f"Starting noise calibration. Please ensure only the industrial noise is present...")
-        
-        # Start the audio stream if not already running
-        self.start_audio_stream()
-        
-        # Calibrate using the current audio stream
-        self.noise_suppressor.calibrate(self.stream, duration)
-        
-        # Set the flag to indicate calibration is done
-        self.is_calibrated = True
-        
-        print("Noise calibration complete. Voice recognition should now be improved.")
-        return True
-        
     def start_audio_stream(self):
         """Start the audio stream for VAD with noise suppression."""
-        # Use the parent method to start the stream
-        super().start_audio_stream()
+        if self.stream is None:
+            self.audio = pyaudio.PyAudio()
+            self.stream = self.audio.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=self.sample_rate,
+                input=True,
+                frames_per_buffer=self.chunk_size
+            )
     
     def record_audio(self):
         """
-        Record audio while speech is detected, with noise suppression applied.
-        Overrides the parent method to add noise filtering.
+        Record audio while speech is detected, with RNNoise suppression applied.
         """
         # Pre-allocate buffer for better performance
         buffer_size = 20 * self.chunk_size
@@ -83,14 +70,13 @@ class EnhancedVoiceHandler(VoiceHandler):
                 # Read audio chunk
                 audio_chunk = self.stream.read(self.chunk_size, exception_on_overflow=False)
                 
-                # Apply noise suppression if calibrated
-                if self.is_calibrated:
-                    audio_chunk = self.noise_suppressor.process_chunk(audio_chunk)
+                # Apply RNNoise suppression
+                filtered_chunk = self.noise_suppressor.process_chunk(audio_chunk)
                 
-                chunk_len = len(audio_chunk)
+                chunk_len = len(filtered_chunk)
                 
                 # Check if speech is detected using WebRTC VAD
-                if self.is_speech(audio_chunk):
+                if self.is_speech(filtered_chunk):
                     # Reset timeout counter when speech is detected
                     speech_detected = True
                     
@@ -98,8 +84,8 @@ class EnhancedVoiceHandler(VoiceHandler):
                     if total_bytes + chunk_len > len(frames):
                         frames.extend(bytearray(chunk_len * 5))
                     
-                    # Add chunk to buffer
-                    frames[total_bytes:total_bytes+chunk_len] = audio_chunk
+                    # Add filtered chunk to buffer
+                    frames[total_bytes:total_bytes+chunk_len] = filtered_chunk
                     total_bytes += chunk_len
                     silence_frames = 0
                 else:
@@ -128,20 +114,13 @@ class EnhancedVoiceHandler(VoiceHandler):
     
     def listen_for_command(self):
         """
-        Listen for voice command with noise suppression and return the recognized text.
-        Overrides the parent method to add noise filtering.
+        Listen for voice command with RNNoise suppression and return the recognized text.
         """
-        # If not calibrated, suggest calibration first time
-        if not self.is_calibrated:
-            print("Noise profile not calibrated. For optimal performance in noisy environments,")
-            print("consider calibrating first with the calibrate_noise_profile() method.")
-        
-        # Use the parent method for listening
         return super().listen_for_command()
     
     def filter_audio_file(self, input_file, output_file=None):
         """
-        Apply noise suppression to an existing audio file.
+        Apply RNNoise suppression to an existing audio file.
         
         Args:
             input_file: Path to input audio file

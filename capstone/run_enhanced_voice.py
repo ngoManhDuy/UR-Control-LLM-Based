@@ -5,7 +5,7 @@ UR3 Robot Voice Control with Noise Suppression - Industrial Environment Edition
 
 This script launches the voice-controlled robot application with enhanced noise suppression
 capabilities specifically designed for industrial environments with pneumatic machines
-and air compressors.
+and air compressors using RNNoise technology.
 """
 
 import asyncio
@@ -34,37 +34,10 @@ def show_error_dialog(error_msg):
     return app
 
 
-async def calibrate_and_run(chat_window, ur_controller, voice_handler):
-    """Calibrate noise profile and then run the main application loop"""
-    # Add calibration notification
-    chat_window.signals.add_status_message.emit("Initializing noise calibration...")
-    
-    # Ask if user wants to calibrate for noise
-    app = QApplication.instance()
-    calibration_box = QMessageBox()
-    calibration_box.setIcon(QMessageBox.Icon.Question)
-    calibration_box.setWindowTitle("Noise Calibration")
-    calibration_box.setText("Would you like to calibrate for industrial noise?")
-    calibration_box.setInformativeText("This will help filter out pneumatic machine and air compressor noise.")
-    calibration_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-    button = calibration_box.exec()
-    
-    # If yes, perform calibration
-    if button == QMessageBox.StandardButton.Yes:
-        chat_window.signals.add_status_message.emit(
-            "Starting noise calibration. Please ensure only background machinery noise is present (no speech)."
-        )
-        
-        # Countdown for preparation
-        for i in range(5, 0, -1):
-            chat_window.signals.add_status_message.emit(f"Calibrating in {i}...")
-            await asyncio.sleep(1)
-            
-        # Perform calibration
-        voice_handler.calibrate_noise_profile(duration=5)
-        chat_window.signals.add_status_message.emit("Noise calibration complete!")
-    
+async def run_voice_control(chat_window, ur_controller, voice_handler):
+    """Run the main application loop with noise suppression"""
     # Start the main application loop
+    chat_window.signals.add_status_message.emit("Starting voice control with noise suppression...")
     chat_window.signals.add_status_message.emit("Waiting for voice commands...")
     
     # Initialize conversation history
@@ -110,8 +83,8 @@ async def enhanced_main():
         # Initialize the enhanced voice handler with noise suppression
         voice_handler = EnhancedVoiceHandler()
         
-        # Start the main application loop with calibration
-        await calibrate_and_run(chat_window, ur_controller, voice_handler)
+        # Start the main application loop
+        await run_voice_control(chat_window, ur_controller, voice_handler)
         
         # Clean up resources
         ur_controller.close()
