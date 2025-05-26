@@ -1,94 +1,138 @@
 # Industrial Noise Suppression System
 
-A specialized audio processing system designed to suppress noise from pneumatic machines and air compressors in industrial environments. This system enhances voice recognition in noisy industrial settings.
+A specialized audio processing system designed to suppress noise in industrial environments, particularly optimized for robotic control applications. The system uses state-of-the-art deep learning models (Facebook Denoiser) combined with traditional signal processing techniques for real-time noise suppression.
 
-## Components
+## Key Features
 
-1. **IndustrialNoiseSuppressor**: Core noise suppression engine specialized for industrial environments
-2. **EnhancedVoiceHandler**: Extended voice handler with noise suppression capabilities
-3. **Run Scripts**:
-   - `run_enhanced_voice.py`: Main application with UI and robot control integration
-   - `noise_suppressor_tool.py`: Standalone tool for noise profile creation and audio processing
+1. **Advanced Noise Suppression**:
+   - Facebook Denoiser model for deep learning-based noise removal
+   - Real-time processing capability
+   - Optimized for industrial environments
+   - WebRTC VAD (Voice Activity Detection) integration
+
+2. **Modern User Interface**:
+   - PyQt6-based chat interface
+   - Real-time audio visualization
+   - Status updates and system feedback
+   - Dark theme for better visibility
+
+3. **Robust Audio Processing**:
+   - Support for multiple audio formats
+   - Real-time audio streaming
+   - Configurable sample rates and chunk sizes
+   - Multi-threaded processing for better performance
+
+## System Requirements
+
+- Python 3.8 or higher
+- CUDA-capable GPU (recommended for optimal performance)
+- Working microphone and speakers
+- Sufficient RAM (minimum 4GB recommended)
 
 ## Installation
 
-1. Install the required dependencies:
+1. Clone the repository:
+```bash
+git clone https://github.com/ngoManhDuy/UR-Control-LLM-Based/tree/kido
+```
 
+2. Create and activate a virtual environment (recommended):
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+3. Install the required dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Make sure you have a working microphone and speakers.
+4. Set up your OpenAI API key:
+   - Create a `.env` file in the project root
+   - Add your API key: `OPENAI_API_KEY=your_api_key_here`
 
 ## Usage
 
-### Main Application with Robot Control
+### 1. Main Application
 
-To run the full system with the robotic arm control interface and noise suppression:
-
+Run the enhanced voice control system:
 ```bash
 python run_enhanced_voice.py
 ```
 
 This will:
-1. Start the chat UI
-2. Ask if you want to calibrate for industrial noise
-3. If yes, record a noise profile for 5 seconds
-4. Allow you to control the robot with voice commands in the noisy environment
+- Start the chat UI
+- Initialize the noise suppression system
+- Begin voice command processing
 
-### Standalone Noise Suppressor Tool
+### 2. Testing Tools
 
-The `noise_suppressor_tool.py` utility can be used independently for:
-
-#### 1. Create a Noise Profile
-
-Record a sample of your industrial environment noise (without speech) to create a profile:
-
+#### Test Noise Suppression:
 ```bash
-python noise_suppressor_tool.py profile --output my_factory_noise.wav --duration 10
+python test_noise_suppression.py --mode realtime
+# or
+python test_noise_suppression.py --mode file --input input.wav --output output.wav
 ```
 
-#### 2. Filter an Existing Audio File
-
-Apply noise suppression to an existing audio recording:
-
+#### Test Denoiser:
 ```bash
-python noise_suppressor_tool.py filter my_recording.wav --noise-profile my_factory_noise.wav
+python test_denoiser.py
 ```
 
-#### 3. Record and Filter in Real-time
+### 3. Standalone Noise Suppressor
 
-Record audio with noise suppression applied in real-time:
-
+Process audio files independently:
 ```bash
-python noise_suppressor_tool.py record --duration 30 --output clean_speech.wav
+python noise_suppressor_tool.py filter input.wav --output filtered.wav
 ```
 
-## How It Works
+Record and filter in real-time:
+```bash
+python noise_suppressor_tool.py record --duration 30 --output recording.wav
+```
 
-The system uses multiple techniques to suppress industrial noise:
+## Architecture
 
-1. **Spectral Gating**: Learns the noise profile during calibration and suppresses those frequencies
-2. **Bandpass Filtering**: Preserves the human voice frequency range (300Hz-3.4kHz)
-3. **Notch Filtering**: Specifically targets frequency ranges common to:
-   - Pneumatic machinery (1kHz-4kHz)
-   - Air compressors (100Hz-800Hz)
+The system consists of several key components:
 
-## Optimization
+1. **IndustrialNoiseSuppressor**: Core noise suppression engine using Facebook Denoiser
+2. **EnhancedVoiceHandler**: Voice processing with integrated noise suppression
+3. **ChatWindow**: Modern PyQt6-based user interface
+4. **URController**: Robot control integration
 
-The noise suppressor is optimized for:
+## Performance Optimization
+
+The system is optimized for:
 - Real-time processing with minimal latency
-- Preserving speech intelligibility 
-- Reducing fatigue from continuous industrial noise
+- GPU acceleration when available
+- Memory-efficient audio processing
+- Threaded UI for responsive interaction
 
-## Integration
+## Troubleshooting
 
-To integrate with your own applications, you can:
+Common issues and solutions:
 
-1. Use `EnhancedVoiceHandler` as a drop-in replacement for `VoiceHandler`
-2. Use `IndustrialNoiseSuppressor` directly for custom audio processing pipelines
-3. Process files in batch using the standalone tool
+1. **Audio Device Issues**:
+   - Ensure your microphone is properly connected
+   - Check system audio settings
+   - Verify PyAudio installation
+
+2. **GPU-related Issues**:
+   - Update CUDA drivers if using GPU
+   - Check torch installation matches CUDA version
+   - Fall back to CPU if needed
+
+3. **Performance Issues**:
+   - Adjust chunk size for better latency
+   - Monitor CPU/GPU usage
+   - Close unnecessary applications
 
 ## License
 
-This software is provided for educational and research purposes. 
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgments
+
+- Facebook Denoiser team for their excellent model
+- PyQt team for the UI framework
+- The WebRTC team for VAD implementation 
