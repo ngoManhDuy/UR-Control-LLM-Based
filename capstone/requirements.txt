@@ -11,4 +11,7 @@ python-dotenv==0.19.2
 PyQt6==6.4.2
 setuptools>=65.5.1
 wheel>=0.38.4
-rnnoise-python==0.0.1 
+rnnoise-python==0.0.1
+torch==1.13.1
+torchaudio==0.13.1
+denoiser==1.0.0 
