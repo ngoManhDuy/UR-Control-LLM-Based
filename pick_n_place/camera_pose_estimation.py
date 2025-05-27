@@ -1,6 +1,6 @@
 import numpy as np
 import cv2
-from pick_n_place.camera import RealSenseCamera
+from camera import RealSenseCamera
 import time
 
 class CameraPoseEstimator:
