@@ -5,10 +5,13 @@ import json
 import math
 import asyncio
 import sys
+import wave
+import pyaudio
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from URRobotControl import URRobotControl
 from ur_robot_llm_functions import FUNCTION_DEFINITIONS
+from capstone.audio_noise_suppression import IndustrialNoiseSuppressor
 import logging
 
 # Set up logging
@@ -45,6 +48,84 @@ You have access to various control functions:
 Always prioritize safety and provide clear feedback about what actions you're taking.
 If a command is ambiguous, ask for clarification rather than making assumptions."""
 }
+
+class VoiceInput:
+    def __init__(self):
+        self.chunk_size = 1024
+        self.sample_rate = 16000
+        self.record_seconds = 5
+        self.noise_suppressor = IndustrialNoiseSuppressor(
+            sample_rate=self.sample_rate,
+            chunk_size=self.chunk_size
+        )
+        self.audio = pyaudio.PyAudio()
+
+    def record_voice(self):
+        """Record voice command and apply noise suppression"""
+        print("\nListening for voice command...")
+        
+        # Open audio stream
+        stream = self.audio.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=self.sample_rate,
+            input=True,
+            frames_per_buffer=self.chunk_size
+        )
+
+        frames = []
+        
+        try:
+            # Record audio
+            for _ in range(0, int(self.sample_rate / self.chunk_size * self.record_seconds)):
+                data = stream.read(self.chunk_size, exception_on_overflow=False)
+                # Apply noise suppression in real-time
+                filtered_data = self.noise_suppressor.process_chunk(data)
+                frames.append(filtered_data)
+                
+        finally:
+            stream.stop_stream()
+            stream.close()
+
+        # Save temporary WAV file
+        temp_wav = "temp_voice_command.wav"
+        with wave.open(temp_wav, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # 16-bit audio
+            wf.setframerate(self.sample_rate)
+            wf.writeframes(b''.join(frames))
+
+        return temp_wav
+
+    def transcribe_audio(self, audio_file):
+        """Transcribe the recorded audio using OpenAI Whisper API"""
+        try:
+            with open(audio_file, "rb") as audio:
+                client = AsyncOpenAI()
+                # Create a new event loop for async operation
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                response = loop.run_until_complete(
+                    client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=audio,
+                        response_format="text"
+                    )
+                )
+                loop.close()
+                return response
+        except Exception as e:
+            logging.error(f"Transcription error: {e}")
+            return None
+        finally:
+            # Clean up temporary file
+            if os.path.exists(audio_file):
+                os.remove(audio_file)
+
+    def close(self):
+        """Clean up resources"""
+        self.audio.terminate()
+        self.noise_suppressor.close()
 
 class URRobotLLMController:
     def __init__(self):
@@ -229,27 +310,47 @@ async def process_command(command, controller):
 async def main():
     # Create instance of the robot controller
     controller = URRobotLLMController()
+    voice_input = VoiceInput()
 
     print("\nUR Robot Advanced Control with LLM Interface")
     print("-------------------------------------------")
-    print("Type natural language commands to control the robot.")
-    print("Examples:")
-    print("  - 'Move the robot to position x=0.5, y=0.2, z=0.3'")
-    print("  - 'Rotate joint 0 to 45 degrees'")
-    print("  - 'Open the gripper'")
-    print("  - 'Enable freedrive mode'")
-    print("  - 'What is the current robot status?'")
-    print("  - Type 'exit' to quit")
+    print("Choose input mode:")
+    print("1. Text input (type commands)")
+    print("2. Voice input (speak commands)")
+    print("Type 'switch' to change modes")
+    print("Type 'exit' to quit")
     print("-------------------------------------------")
+    
+    # Default to text input mode
+    voice_mode = False
     
     try:
         while True:
-            command = input("\nEnter command: ").strip()
-            
-            if command.lower() in ['exit', 'quit']:
-                break
+            if voice_mode:
+                print("\nVOICE MODE: Press Enter to start recording (5 seconds)...")
+                input()  # Wait for Enter key
                 
-            await process_command(command, controller)
+                # Record and process voice
+                audio_file = voice_input.record_voice()
+                command = voice_input.transcribe_audio(audio_file)
+                
+                if command:
+                    print(f"\nTranscribed command: {command}")
+                    await process_command(command, controller)
+                else:
+                    print("Failed to transcribe voice command. Please try again.")
+            else:
+                command = input("\nEnter command: ").strip()
+            
+            if command.lower() == 'exit':
+                break
+            elif command.lower() == 'switch':
+                voice_mode = not voice_mode
+                print(f"\nSwitched to {'voice' if voice_mode else 'text'} input mode")
+                continue
+                
+            if not voice_mode:
+                await process_command(command, controller)
             
     except KeyboardInterrupt:
         print("\nOperation interrupted by user")
@@ -258,6 +359,7 @@ async def main():
         logging.error(f"Main loop error: {e}")
     finally:
         controller.close()
+        voice_input.close()
         print("Program terminated.")
 
 if __name__ == "__main__":
