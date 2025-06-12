@@ -3,7 +3,11 @@ import cv2
 import time
 import json
 from datetime import datetime
-from pick_n_place.camera_pose_estimation import CameraPoseEstimator
+import sys
+import os
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from pick_n_place.cylinder_pose_estimation import CameraPoseEstimator
 from URRobotControl import URRobotControl
 
 class HandEyeCalibrator:
@@ -71,7 +75,10 @@ class HandEyeCalibrator:
         
         print(f"Collected sample {len(self.robot_poses)}:")
         print(f"TCP pose: {tcp_pose}")
-        print(f"Marker position: {tvec}")
+        if tvec.ndim > 1:
+            print(f"Marker position: {tvec.flatten()}")
+        else:
+            print(f"Marker position: {tvec}")
         
         return True
         
@@ -93,12 +100,22 @@ class HandEyeCalibrator:
             R_target2cam = [m[:3, :3] for m in self.camera_poses]
             t_target2cam = [m[:3, 3] for m in self.camera_poses]
             
-            # Perform calibration
-            R_cam2gripper, t_cam2gripper = cv2.calibrateHandEye(
-                R_gripper2base, t_gripper2base,
-                R_target2cam, t_target2cam,
-                method=cv2.CALIB_HAND_EYE_TSAI
-            )
+            # Perform calibration using OpenCV's hand-eye calibration
+            try:
+                # Try the newer API first
+                R_cam2gripper, t_cam2gripper = cv2.calibrateHandEye(
+                    R_gripper2base, t_gripper2base,
+                    R_target2cam, t_target2cam,
+                    method=cv2.CALIB_HAND_EYE_TSAI
+                )
+            except AttributeError:
+                # Fallback for older OpenCV versions
+                print("Using alternative hand-eye calibration method...")
+                # You might need to implement alternative method or use different parameters
+                R_cam2gripper, t_cam2gripper = cv2.calibrateHandEye(
+                    R_gripper2base, t_gripper2base,
+                    R_target2cam, t_target2cam
+                )
             
             # Store result as 4x4 transformation matrix
             self.eye_hand_matrix = np.eye(4)
@@ -124,7 +141,9 @@ class HandEyeCalibrator:
         data = {
             'timestamp': datetime.now().isoformat(),
             'eye_hand_matrix': self.eye_hand_matrix.tolist(),
-            'num_samples': len(self.robot_poses)
+            'num_samples': len(self.robot_poses),
+            'marker_size': self.camera.marker_size,
+            'opencv_version': cv2.__version__
         }
         
         try:
@@ -145,6 +164,13 @@ class HandEyeCalibrator:
             print(f"Loaded calibration from {filename}")
             print("Camera to end-effector transformation:")
             print(self.eye_hand_matrix)
+            
+            # Print additional info if available
+            if 'opencv_version' in data:
+                print(f"Calibration was created with OpenCV version: {data['opencv_version']}")
+            if 'marker_size' in data:
+                print(f"Marker size used: {data['marker_size']} meters")
+                
             return True
         except Exception as e:
             print(f"Failed to load calibration: {e}")
@@ -162,21 +188,37 @@ class HandEyeCalibrator:
             return None
             
         errors = []
-        for robot_pose, camera_pose in zip(self.robot_poses, self.camera_poses):
-            # Predicted marker position through robot chain
-            predicted_marker = robot_pose @ self.eye_hand_matrix @ camera_pose
+        for i, (robot_pose, camera_pose) in enumerate(zip(self.robot_poses, self.camera_poses)):
+            # Calculate the marker position in base frame using two different paths
             
-            # Actual marker position
-            actual_marker = robot_pose @ self.eye_hand_matrix @ camera_pose
+            # Path 1: Through robot kinematics and hand-eye calibration
+            marker_pos_path1 = robot_pose @ self.eye_hand_matrix @ camera_pose
             
-            # Compute position error
-            error = np.linalg.norm(predicted_marker[:3, 3] - actual_marker[:3, 3])
+            # Path 2: Direct calculation (should be the same for all poses if calibration is perfect)
+            # For verification, we compare the consistency across all poses
+            if i == 0:
+                reference_marker_pos = marker_pos_path1
+            
+            # Compute position error relative to first pose
+            error = np.linalg.norm(marker_pos_path1[:3, 3] - reference_marker_pos[:3, 3])
             errors.append(error)
             
         avg_error = np.mean(errors)
+        max_error = np.max(errors)
+        
         print(f"\nCalibration verification:")
-        print(f"Average position error: {avg_error:.3f} meters")
-        print(f"Max position error: {np.max(errors):.3f} meters")
+        print(f"Average position error: {avg_error:.4f} meters")
+        print(f"Max position error: {max_error:.4f} meters")
+        print(f"Number of poses: {len(self.robot_poses)}")
+        
+        if avg_error < 0.005:  # 5mm
+            print("✓ Calibration quality: EXCELLENT")
+        elif avg_error < 0.010:  # 10mm
+            print("✓ Calibration quality: GOOD")
+        elif avg_error < 0.020:  # 20mm
+            print("⚠ Calibration quality: ACCEPTABLE")
+        else:
+            print("✗ Calibration quality: POOR - Consider recalibrating")
         
         return avg_error
         
@@ -202,8 +244,11 @@ class HandEyeCalibrator:
         # Convert rotation vector to matrix
         matrix[:3, :3], _ = cv2.Rodrigues(rvec)
         
-        # Set translation
-        matrix[:3, 3] = tvec
+        # Set translation - handle both 1D and 2D arrays
+        if tvec.ndim > 1:
+            matrix[:3, 3] = tvec.flatten()
+        else:
+            matrix[:3, 3] = tvec
         
         return matrix
 
@@ -222,16 +267,31 @@ def run_calibration(robot_ip, num_poses=5):
         return
         
     try:
-        print("\nStarting hand-eye calibration procedure")
+        print(f"\nStarting hand-eye calibration procedure")
+        print(f"OpenCV version: {cv2.__version__}")
         print(f"Please move the robot to {num_poses} different poses")
+        print("Make sure the ArUco marker (ID 7) is visible in each pose")
         print("Press 'c' to collect sample at current pose")
         print("Press 'q' to finish collection and calculate calibration")
+        print("Press 'r' to reset and start over")
         
         while len(calibrator.robot_poses) < num_poses:
             # Show current camera view
             success, _, _, image = calibrator.camera.detect_marker_pose()
             if image is not None:
-                cv2.imshow('Camera View', image)
+                # Add status text to image
+                status_text = [
+                    f"Samples collected: {len(calibrator.robot_poses)}/{num_poses}",
+                    f"Marker detected: {'YES' if success else 'NO'}",
+                    "Press 'c' to collect, 'q' to finish, 'r' to reset"
+                ]
+                
+                for i, text in enumerate(status_text):
+                    color = (0, 255, 0) if success else (0, 0, 255)
+                    cv2.putText(image, text, (10, 30 + 30*i), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                
+                cv2.imshow('Camera View - Hand-Eye Calibration', image)
                 
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
@@ -239,23 +299,36 @@ def run_calibration(robot_ip, num_poses=5):
             elif key == ord('c'):
                 print(f"\nCollecting sample {len(calibrator.robot_poses) + 1}/{num_poses}")
                 if calibrator.collect_calibration_sample():
-                    print("Sample collected successfully")
+                    print("✓ Sample collected successfully")
                     time.sleep(1)  # Wait for robot to stabilize
+                else:
+                    print("✗ Failed to collect sample - make sure marker is visible")
+            elif key == ord('r'):
+                print("\nResetting calibration data...")
+                calibrator.robot_poses.clear()
+                calibrator.camera_poses.clear()
+                print("Data reset. Start collecting samples again.")
                 
+        cv2.destroyAllWindows()
+        
         if len(calibrator.robot_poses) >= 3:
-            print("\nPerforming calibration...")
+            print(f"\nPerforming calibration with {len(calibrator.robot_poses)} poses...")
             if calibrator.calibrate():
                 # Verify and save calibration
                 calibrator.verify_calibration()
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                calibrator.save_calibration(f"hand_eye_calibration_{timestamp}.json")
+                filename = f"hand_eye_calibration_{timestamp}.json"
+                calibrator.save_calibration(filename)
+                print(f"\n✓ Calibration completed and saved as: {filename}")
+            else:
+                print("\n✗ Calibration failed")
         else:
-            print("Not enough samples collected for calibration")
+            print(f"\n✗ Not enough samples collected for calibration (need at least 3, got {len(calibrator.robot_poses)})")
             
     finally:
         calibrator.disconnect()
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    ROBOT_IP = "192.168.1.100"  # Replace with your robot's IP
-    run_calibration(ROBOT_IP) 
+    ROBOT_IP = "169.254.200.239"  # Replace with your robot's IP
+    run_calibration(ROBOT_IP, num_poses=20) 

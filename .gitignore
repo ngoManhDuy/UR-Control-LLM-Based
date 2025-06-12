@@ -1,0 +1,17 @@
+.env
+ur_robot.log
+ur_log/
+
+test_Code/
+results/
+
+realsense/ 
+capstone/ 
+.vscode/
+
+__pycache__/
+best.pt
+
+hand_eye_calibration_best.json
+calib_results/
+

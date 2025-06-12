@@ -17,8 +17,12 @@ class RealSenseCamera:
         self.align = rs.align(rs.stream.color)
         
         # Camera intrinsic parameters (will be populated after connection)
-        self.intrinsics = None
+        self._intrinsics = None
         self.depth_scale = None
+        
+        # OpenCV camera matrix and distortion coefficients
+        self.camera_matrix = None
+        self.dist_coeffs = None
         
     def connect(self):
         """Connect to the RealSense camera and start streaming"""
@@ -33,12 +37,22 @@ class RealSenseCamera:
             
             # Get camera intrinsics
             color_profile = profile.get_stream(rs.stream.color)
-            self.intrinsics = color_profile.as_video_stream_profile().get_intrinsics()
+            self._intrinsics = color_profile.as_video_stream_profile().get_intrinsics()
+            
+            # Convert RealSense intrinsics to OpenCV camera matrix format
+            self.camera_matrix = np.array([
+                [self._intrinsics.fx, 0, self._intrinsics.ppx],
+                [0, self._intrinsics.fy, self._intrinsics.ppy],
+                [0, 0, 1]
+            ], dtype=np.float64)
+            
+            # For RealSense D435i, we can assume zero distortion as it provides rectified images
+            self.dist_coeffs = np.zeros(5)
             
             print("Camera connected successfully!")
-            print(f"Resolution: {self.intrinsics.width} x {self.intrinsics.height}")
-            print(f"Focal Length: fx={self.intrinsics.fx:.2f}, fy={self.intrinsics.fy:.2f}")
-            print(f"Principal Point: cx={self.intrinsics.ppx:.2f}, cy={self.intrinsics.ppy:.2f}")
+            print(f"Resolution: {self._intrinsics.width} x {self._intrinsics.height}")
+            print(f"Focal Length: fx={self._intrinsics.fx:.2f}, fy={self._intrinsics.fy:.2f}")
+            print(f"Principal Point: cx={self._intrinsics.ppx:.2f}, cy={self._intrinsics.ppy:.2f}")
             
             return True
             
@@ -74,7 +88,7 @@ class RealSenseCamera:
     
     def get_3d_point(self, x, y, depth_value):
         """Convert 2D pixel coordinates to 3D world coordinates"""
-        if self.intrinsics is None:
+        if self._intrinsics is None:
             return None
         
         # Convert depth value to meters
@@ -82,7 +96,7 @@ class RealSenseCamera:
         
         # Use RealSense intrinsics to convert to 3D
         point_3d = rs.rs2_deproject_pixel_to_point(
-            self.intrinsics, [x, y], depth_in_meters
+            self._intrinsics, [x, y], depth_in_meters
         )
         
         return point_3d  # Returns [x, y, z] in meters
@@ -94,6 +108,10 @@ class RealSenseCamera:
             print("Camera disconnected successfully!")
         except Exception as e:
             print(f"Error disconnecting camera: {e}")
+    
+    def get_intrinsics(self):
+        """Get camera intrinsics"""
+        return self._intrinsics
 
 def test_camera():
     """Test the camera connection and display live feed"""
