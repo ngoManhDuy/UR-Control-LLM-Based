@@ -34,9 +34,9 @@ class RealTimePoseEstimator:
         """
         # Run the complete pipeline
         success, pose_6dof = self.estimator.get_cylinder_6dof_pose(
-            confidence_threshold=0.3,
+            confidence_threshold=0.8,
             downsample_factor=2,
-            max_iterations=500,
+            max_iterations=1000,
             epsilon=0.0005,  # 0.5mm tolerance
             min_inliers=20,
             visualize=False
@@ -165,7 +165,7 @@ def main():
         print("❌ Failed to connect to camera")
         return
     
-    print("🎯 Real-Time Cylinder Pose Estimation")
+    print("Real-Time Cylinder Pose Estimation")
     print("Press 'q' to quit")
     print("Live display: Bounding box + 6D pose on camera feed")
     

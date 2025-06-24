@@ -81,7 +81,7 @@ class CylinderPoseEstimator:
         """Disconnect from the camera"""
         self.camera.disconnect()
     
-    def detect_cylinder_bbox(self, confidence_threshold=0.5):
+    def detect_cylinder_bbox(self, confidence_threshold=0.8):
         """
         Detect cylinder using YOLO and return bounding box
         
@@ -140,7 +140,7 @@ class CylinderPoseEstimator:
         x_min, y_min, x_max, y_max = bbox
         
         # Get camera intrinsics
-        intrinsics = self.camera.intrinsics
+        intrinsics = self.camera._intrinsics
         fx, fy = intrinsics.fx, intrinsics.fy
         cx, cy = intrinsics.ppx, intrinsics.ppy
         
@@ -437,7 +437,7 @@ class CylinderPoseEstimator:
         
         return success, best_center_x, best_center_y, best_radius, best_inlier_mask
     
-    def fit_constrained_cylinder_ur3(self, points_3d, max_iterations=500, epsilon=0.0005, min_inliers=30):
+    def fit_constrained_cylinder_ur3(self, points_3d, max_iterations=500, epsilon=0.0005, min_inliers=30, detection_confidence=None):
         """
         Constrained cylinder fitting optimized for UR3 "Finding Pose" setup
         
@@ -451,6 +451,7 @@ class CylinderPoseEstimator:
             max_iterations: Maximum RANSAC iterations  
             epsilon: Inlier threshold in meters
             min_inliers: Minimum number of inliers
+            detection_confidence: YOLO detection confidence (optional)
             
         Returns:
             tuple: (success, cylinder_params, fit_quality)
@@ -518,6 +519,10 @@ class CylinderPoseEstimator:
             'inlier_mask': inlier_mask_2d
         }
         
+        # Add detection confidence if provided
+        if detection_confidence is not None:
+            cylinder_params['detection_confidence'] = detection_confidence
+        
         fit_quality = {
             'inlier_count': inlier_count,
             'total_points': len(points_3d),
@@ -528,10 +533,16 @@ class CylinderPoseEstimator:
             'method': 'constrained_2d_circle'
         }
         
+        # Add detection confidence to fit_quality as well
+        if detection_confidence is not None:
+            fit_quality['detection_confidence'] = detection_confidence
+        
         print(f"✓ Constrained cylinder fitting completed:")
         print(f"  Center: [{cylinder_center[0]:.4f}, {cylinder_center[1]:.4f}, {cylinder_center[2]:.4f}]")
         print(f"  Radius: {radius_2d:.4f}m (error: {radius_error_percentage:.1f}%)")
         print(f"  Inliers: {inlier_count}/{len(points_3d)} ({inlier_percentage:.1f}%)")
+        if detection_confidence is not None:
+            print(f"  YOLO Confidence: {detection_confidence:.3f}")
         
         return True, cylinder_params, fit_quality
 
@@ -696,16 +707,13 @@ class CylinderPoseEstimator:
         print(f"Using constrained 2D circle approach with vertical cylinder assumption")
         
         fit_success, cylinder_params, fit_quality = self.fit_constrained_cylinder_ur3(
-            point_cloud, max_iterations, epsilon, min_inliers
+            point_cloud, max_iterations, epsilon, min_inliers, detection_confidence
         )
         
         if not fit_success:
             return False, None, None
         
-        # Step 3: Add detection confidence to quality metrics
-        fit_quality['detection_confidence'] = detection_confidence
-        
-        # Step 4: Visualize if requested
+        # Step 3: Visualize if requested
         if visualize:
             # Get the color image for visualization
             color_image, _ = self.camera.get_frames()
@@ -763,7 +771,7 @@ class CylinderPoseEstimator:
         return pose_6dof
                                                                 
     def _calculate_pose_confidence(self, cylinder_params):
-        """Calculate confidence score for the estimated pose - optimized for UR3 top-down grasping"""
+        """Calculate confidence score for the estimated pose - improved for realistic scoring"""
         # Get fitting quality metrics
         if 'inlier_mask' in cylinder_params:
             inlier_count = np.sum(cylinder_params['inlier_mask'])
@@ -771,6 +779,28 @@ class CylinderPoseEstimator:
             inlier_ratio = inlier_count / total_points if total_points > 0 else 0
         else:
             inlier_ratio = 0.7
+        
+        # IMPROVED: Realistic inlier ratio scoring for UR3 top-down cylinder detection
+        # In top-down view of cylinder rim, 15-25% inlier ratio is actually quite good
+        # because we're seeing the circular edge, not the full cylindrical surface
+        if inlier_ratio >= 0.25:  # ≥25% is excellent for rim detection
+            inlier_score = 1.0
+            inlier_desc = "Excellent (≥25% for rim detection)"
+        elif inlier_ratio >= 0.20:  # 20-25% is very good
+            inlier_score = 0.9 + 0.1 * (inlier_ratio - 0.20) / 0.05
+            inlier_desc = f"Very Good ({inlier_ratio*100:.1f}% for rim detection)"
+        elif inlier_ratio >= 0.15:  # 15-20% is good
+            inlier_score = 0.7 + 0.2 * (inlier_ratio - 0.15) / 0.05
+            inlier_desc = f"Good ({inlier_ratio*100:.1f}% for rim detection)"
+        elif inlier_ratio >= 0.10:  # 10-15% is fair
+            inlier_score = 0.4 + 0.3 * (inlier_ratio - 0.10) / 0.05
+            inlier_desc = f"Fair ({inlier_ratio*100:.1f}%)"
+        else:  # < 10% is poor
+            inlier_score = max(0.1, inlier_ratio / 0.10 * 0.4)
+            inlier_desc = f"Poor ({inlier_ratio*100:.1f}%)"
+        
+        print(f"   Score: {inlier_score:.3f} - {inlier_desc}")
+        print(f"   Weight: 40% → Contribution: {0.40 * inlier_score:.3f}")
         
         # Position stability - how well do inliers agree on center position
         if 'inliers' in cylinder_params and len(cylinder_params['inliers']) > 10:
@@ -786,32 +816,131 @@ class CylinderPoseEstimator:
             z_values = inlier_points[:, 2]
             z_std = np.std(z_values)
             
-            # Position stability score (lower std = higher stability)
-            # Use exponential decay: stability = exp(-std/tolerance)
-            xy_stability = np.exp(-xy_std / 0.001)  # 1mm tolerance for XY
-            z_stability = np.exp(-z_std / 0.002)    # 2mm tolerance for Z
+            print(f"\n📍 POSITION STABILITY:")
+            print(f"   XY std: {xy_std*1000:.2f}mm")
+            
+            # IMPROVED: More realistic position stability scoring
+            # For cylinder rim detection, some variation is expected and acceptable
+            # Use sigmoid-like function instead of harsh exponential decay
+            
+            # XY stability: Good if std < 2mm, acceptable if < 5mm
+            if xy_std < 0.002:  # < 2mm
+                xy_stability = 1.0
+                xy_desc = "Excellent (< 2mm)"
+            elif xy_std < 0.005:  # 2-5mm
+                xy_stability = 0.8 - 0.3 * (xy_std - 0.002) / 0.003  # Linear decay 0.8->0.5
+                xy_desc = "Good (2-5mm)"
+            else:  # > 5mm
+                xy_stability = max(0.2, 0.5 * np.exp(-(xy_std - 0.005) / 0.003))
+                xy_desc = "Poor (> 5mm)"
+            
+            print(f"   XY stability: {xy_stability:.3f} - {xy_desc}")
+            
+            print(f"   Z std: {z_std*1000:.2f}mm")
+            
+            # Z stability: More lenient since top-down view has natural Z variation
+            if z_std < 0.003:  # < 3mm
+                z_stability = 1.0
+                z_desc = "Excellent (< 3mm)"
+            elif z_std < 0.008:  # 3-8mm
+                z_stability = 0.9 - 0.4 * (z_std - 0.003) / 0.005  # Linear decay 0.9->0.5
+                z_desc = "Good (3-8mm)"
+            else:  # > 8mm
+                z_stability = max(0.3, 0.5 * np.exp(-(z_std - 0.008) / 0.005))
+                z_desc = "Poor (> 8mm)"
+            
             position_stability = (xy_stability + z_stability) / 2
+            print(f"   Combined: {position_stability:.3f}")
+            print(f"   Weight: 35% → Contribution: {0.35 * position_stability:.3f}")
         else:
             position_stability = 0.5  # Default if not enough inliers
+            print(f"\n📍 POSITION STABILITY: {position_stability:.3f} (default - not enough inliers)")
         
-        # Point density score - more points = higher confidence
-        point_density_score = min(1.0, inlier_count / 50.0)  # Saturate at 50 inliers
+        # IMPROVED: More realistic point density scoring
+        # Lower threshold since we're dealing with small cylinders
+        if inlier_count >= 30:
+            point_density_score = 1.0
+            density_desc = "Excellent (≥30 inliers)"
+        elif inlier_count >= 20:
+            point_density_score = 0.8 + 0.2 * (inlier_count - 20) / 10
+            density_desc = f"Good ({inlier_count} inliers)"
+        elif inlier_count >= 10:
+            point_density_score = 0.5 + 0.3 * (inlier_count - 10) / 10
+            density_desc = f"Fair ({inlier_count} inliers)"
+        else:
+            point_density_score = max(0.2, inlier_count / 10 * 0.5)
+            density_desc = f"Poor ({inlier_count} inliers)"
         
-        # Detection consistency - radius should be reasonable (but not heavily penalized)
+        print(f"\n🔢 POINT DENSITY:")
+        print(f"   Score: {point_density_score:.3f} - {density_desc}")
+        print(f"   Weight: 15% → Contribution: {0.15 * point_density_score:.3f}")
+        
+        # IMPROVED: More lenient radius checking
+        # Since we've seen the algorithm works but radius estimation has some error
         fitted_radius = cylinder_params['radius']
         expected_radius = self.cylinder_radius
         radius_error = abs(fitted_radius - expected_radius) / expected_radius
-        # Gentle penalty: only heavily penalize if radius is >100% off (clearly wrong)
-        radius_reasonableness = 1.0 if radius_error < 1.0 else max(0.3, 1.0 - radius_error)
         
-        # Final confidence: Focus on position and inliers
-        # 50% inlier ratio + 30% position stability + 15% point density + 5% radius check
-        confidence = (0.50 * inlier_ratio + 
-                     0.30 * position_stability +
-                     0.15 * point_density_score +
-                     0.05 * radius_reasonableness)
+        if radius_error < 0.1:  # < 10% error
+            radius_reasonableness = 1.0
+            radius_desc = "Excellent (< 10% error)"
+        elif radius_error < 0.3:  # 10-30% error
+            radius_reasonableness = 0.9 - 0.4 * (radius_error - 0.1) / 0.2  # 0.9->0.5
+            radius_desc = f"Good ({radius_error*100:.1f}% error)"
+        elif radius_error < 0.8:  # 30-80% error
+            radius_reasonableness = 0.5 - 0.3 * (radius_error - 0.3) / 0.5  # 0.5->0.2
+            radius_desc = f"Fair ({radius_error*100:.1f}% error)"
+        else:  # > 80% error
+            radius_reasonableness = 0.2
+            radius_desc = f"Poor ({radius_error*100:.1f}% error)"
         
-        return max(0.0, min(1.0, confidence))
+        print(f"\n📏 RADIUS CHECK:")
+        print(f"   Expected: {expected_radius*1000:.1f}mm, Fitted: {fitted_radius*1000:.1f}mm")
+        print(f"   Error: {radius_error*100:.1f}%")
+        print(f"   Score: {radius_reasonableness:.3f} - {radius_desc}")
+        print(f"   Weight: 10% → Contribution: {0.10 * radius_reasonableness:.3f}")
+        
+        # IMPROVED: Better weighting scheme optimized for UR3 rim detection
+        # 40% inlier quality + 35% position stability + 15% point density + 10% radius check
+        base_confidence = (0.40 * inlier_score + 
+                          0.35 * position_stability +
+                          0.15 * point_density_score +
+                          0.10 * radius_reasonableness)
+        
+        print(f"\n📈 BASE CONFIDENCE: {base_confidence:.3f}")
+        
+        # IMPROVED: Add bonus for very good fits
+        # If we have good inlier ratio AND good position stability, boost confidence
+        bonus = 0.0
+        if inlier_score > 0.8 and position_stability > 0.8:
+            bonus = 0.1
+            print(f"🎯 EXCELLENCE BONUS: +{bonus:.3f} (high inlier ratio + good stability)")
+        
+        # IMPROVED: Add YOLO detection confidence if available
+        yolo_bonus = 0.0
+        if 'detection_confidence' in cylinder_params:
+            yolo_confidence = cylinder_params['detection_confidence']
+            yolo_bonus = 0.05 * yolo_confidence
+            print(f"🎯 YOLO BONUS: +{yolo_bonus:.3f} (YOLO confidence: {yolo_confidence:.3f})")
+        
+        final_confidence = min(1.0, base_confidence + bonus + yolo_bonus)
+        
+        print(f"\n🏆 FINAL CONFIDENCE: {final_confidence:.3f}")
+        
+        # Quality assessment
+        if final_confidence > 0.8:
+            quality = "🟢 EXCELLENT - Ready for production use"
+        elif final_confidence > 0.6:
+            quality = "🟡 GOOD - Suitable for most applications"
+        elif final_confidence > 0.4:
+            quality = "🟠 FAIR - May work but monitor closely"
+        else:
+            quality = "🔴 POOR - Needs improvement"
+        
+        print(f"   Assessment: {quality}")
+        print("="*50)
+        
+        return final_confidence
 
     def get_cylinder_6dof_pose(self, confidence_threshold=0.3, downsample_factor=2, 
                               max_iterations=500, epsilon=0.0005, min_inliers=20, visualize=False):
@@ -836,9 +965,132 @@ class CylinderPoseEstimator:
         
         # Step 3: Visualize if requested
         if visualize:
-            self._visualize_6dof_pose_simple(cylinder_params, pose_6dof)
+            # Get YOLO detection results for visualization
+            yolo_success, bbox, yolo_confidence, color_image, depth_image = self.detect_cylinder_bbox(confidence_threshold)
+            if yolo_success and color_image is not None:
+                self._visualize_6dof_pose_with_yolo(cylinder_params, pose_6dof, bbox, color_image, yolo_confidence)
+            else:
+                # Fallback to simple visualization if YOLO detection fails
+                self._visualize_6dof_pose_simple(cylinder_params, pose_6dof)
         
         return True, pose_6dof
+
+    def _visualize_6dof_pose_with_yolo(self, cylinder_params, pose_6dof, bbox, color_image, yolo_confidence):
+        """Enhanced visualization with YOLO detection results"""
+        fig = plt.figure(figsize=(20, 5))
+        
+        points_3d = cylinder_params['all_points']
+        inlier_mask = cylinder_params.get('inlier_mask', np.ones(len(points_3d), dtype=bool))
+        position = pose_6dof['position']
+        rotation_matrix = pose_6dof['rotation_matrix']
+        
+        # Plot 1: YOLO Detection Results
+        ax1 = fig.add_subplot(141)
+        # Convert BGR to RGB for matplotlib
+        rgb_image = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+        ax1.imshow(rgb_image)
+        
+        # Draw bounding box
+        if bbox is not None:
+            x_min, y_min, x_max, y_max = bbox
+            rect = plt.Rectangle((x_min, y_min), x_max - x_min, y_max - y_min,
+                               fill=False, color='red', linewidth=2)
+            ax1.add_patch(rect)
+            
+            # Add confidence text
+            ax1.text(x_min, y_min - 10, f'Cylinder: {yolo_confidence:.3f}', 
+                    fontsize=10, color='red', fontweight='bold',
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+        
+        ax1.set_title('YOLO Detection Results')
+        ax1.axis('off')
+        
+        # Plot 2: 3D point cloud with pose coordinate frame
+        ax2 = fig.add_subplot(142, projection='3d')
+        if len(points_3d) > 0:
+            # Plot points
+            outliers_3d = points_3d[~inlier_mask]
+            inliers_3d = points_3d[inlier_mask]
+            
+            if len(outliers_3d) > 0:
+                ax2.scatter(outliers_3d[:, 0], outliers_3d[:, 1], outliers_3d[:, 2], 
+                           c='red', s=2, alpha=0.4, label='Outliers')
+            if len(inliers_3d) > 0:
+                ax2.scatter(inliers_3d[:, 0], inliers_3d[:, 1], inliers_3d[:, 2], 
+                           c='blue', s=2, label='Inliers')
+            
+            # Draw coordinate frame at estimated pose
+            origin = position
+            scale = 0.01  # 1cm arrows
+            
+            # X-axis (red), Y-axis (green), Z-axis (blue)
+            for i, color in enumerate(['r', 'g', 'b']):
+                end = origin + scale * rotation_matrix[:, i]
+                ax2.plot([origin[0], end[0]], [origin[1], end[1]], [origin[2], end[2]], 
+                        f'{color}-', linewidth=3, label=f'{["X","Y","Z"][i]}-axis')
+            
+            ax2.scatter(*origin, c='yellow', s=100, marker='*', label='Pose Origin')
+            ax2.set_xlabel('X (m)')
+            ax2.set_ylabel('Y (m)')
+            ax2.set_zlabel('Z (m)')
+            ax2.set_title('3D Point Cloud + 6DOF Pose')
+            ax2.legend()
+        
+        # Plot 3: Top view with position
+        ax3 = fig.add_subplot(143)
+        if len(points_3d) > 0:
+            points_2d = points_3d[:, :2]
+            inliers_2d = points_2d[inlier_mask]
+            outliers_2d = points_2d[~inlier_mask]
+            
+            if len(outliers_2d) > 0:
+                ax3.scatter(outliers_2d[:, 0], outliers_2d[:, 1], c='red', s=3, alpha=0.6, label='Outliers')
+            if len(inliers_2d) > 0:
+                ax3.scatter(inliers_2d[:, 0], inliers_2d[:, 1], c='blue', s=3, label='Inliers')
+            
+            # Draw fitted circle and pose position
+            circle = plt.Circle((position[0], position[1]), cylinder_params['radius'], 
+                              fill=False, color='green', linewidth=2, label='Fitted Circle')
+            ax3.add_patch(circle)
+            ax3.plot(position[0], position[1], 'y*', markersize=15, label='6DOF Position')
+            
+            ax3.set_xlabel('X (m)')
+            ax3.set_ylabel('Y (m)')
+            ax3.set_title('Top View - Position')
+            ax3.legend()
+            ax3.axis('equal')
+            ax3.grid(True, alpha=0.3)
+        
+        # Plot 4: Pose information
+        ax4 = fig.add_subplot(144)
+        ax4.text(0.05, 0.9, '6DOF POSE (Camera Frame)', fontsize=14, fontweight='bold')
+        
+        ax4.text(0.05, 0.75, 'POSITION:', fontsize=12, fontweight='bold', color='blue')
+        ax4.text(0.05, 0.7, f'  X: {position[0]:+.4f} m', fontsize=10)
+        ax4.text(0.05, 0.65, f'  Y: {position[1]:+.4f} m', fontsize=10)
+        ax4.text(0.05, 0.6, f'  Z: {position[2]:+.4f} m', fontsize=10)
+        
+        ax4.text(0.05, 0.45, 'ROTATION (Euler XYZ):', fontsize=12, fontweight='bold', color='green')
+        euler = pose_6dof['rotation_euler']
+        ax4.text(0.05, 0.4, f'  RX: {np.degrees(euler[0]):+.1f}°', fontsize=10)
+        ax4.text(0.05, 0.35, f'  RY: {np.degrees(euler[1]):+.1f}°', fontsize=10)
+        ax4.text(0.05, 0.3, f'  RZ: {np.degrees(euler[2]):+.1f}°', fontsize=10)
+        
+        confidence = pose_6dof['pose_confidence']
+        ax4.text(0.05, 0.15, f'CONFIDENCE: {confidence:.3f}', 
+                fontsize=12, fontweight='bold', 
+                color='green' if confidence > 0.8 else 'orange' if confidence > 0.6 else 'red')
+        
+        # Add YOLO confidence info
+        ax4.text(0.05, 0.05, f'YOLO: {yolo_confidence:.3f}', 
+                fontsize=10, color='blue')
+        
+        ax4.set_xlim(0, 1)
+        ax4.set_ylim(0, 1)
+        ax4.axis('off')
+        
+        plt.tight_layout()
+        plt.show()
 
     def _visualize_6dof_pose_simple(self, cylinder_params, pose_6dof):
         """Simple visualization focused on pose estimation results"""
@@ -925,47 +1177,193 @@ class CylinderPoseEstimator:
                 fontsize=12, fontweight='bold', 
                 color='green' if confidence > 0.8 else 'orange' if confidence > 0.6 else 'red')
         
-        # Show confidence breakdown for debugging
-        if 'inlier_mask' in cylinder_params and len(cylinder_params.get('inliers', [])) > 10:
-            ax3.text(0.55, 0.9, 'CONFIDENCE BREAKDOWN:', fontsize=10, fontweight='bold')
-            
-            # Calculate individual components (copy from confidence method)
-            inlier_count = np.sum(cylinder_params['inlier_mask'])
-            total_points = len(cylinder_params['all_points'])
-            inlier_ratio = inlier_count / total_points
-            
-            inlier_points = cylinder_params['inliers']
-            xy_points = inlier_points[:, :2]
-            xy_center = np.mean(xy_points, axis=0)
-            xy_distances = np.linalg.norm(xy_points - xy_center, axis=1)
-            xy_std = np.std(xy_distances)
-            z_std = np.std(inlier_points[:, 2])
-            
-            xy_stability = np.exp(-xy_std / 0.001)
-            z_stability = np.exp(-z_std / 0.002)
-            position_stability = (xy_stability + z_stability) / 2
-            point_density_score = min(1.0, inlier_count / 50.0)
-            
-            fitted_radius = cylinder_params['radius']
-            expected_radius = self.cylinder_radius  
-            radius_error = abs(fitted_radius - expected_radius) / expected_radius
-            radius_reasonableness = 1.0 if radius_error < 1.0 else max(0.3, 1.0 - radius_error)
-            
-            ax3.text(0.55, 0.8, f'Inlier Ratio: {inlier_ratio:.3f} (50%)', fontsize=8)
-            ax3.text(0.55, 0.75, f'Position Stability: {position_stability:.3f} (30%)', fontsize=8)
-            ax3.text(0.55, 0.7, f'Point Density: {point_density_score:.3f} (15%)', fontsize=8)
-            ax3.text(0.55, 0.65, f'Radius Check: {radius_reasonableness:.3f} (5%)', fontsize=8)
-            
-            ax3.text(0.55, 0.55, f'XY Std: {xy_std*1000:.2f}mm', fontsize=8)
-            ax3.text(0.55, 0.5, f'Z Std: {z_std*1000:.2f}mm', fontsize=8)
-            ax3.text(0.55, 0.45, f'Radius Error: {radius_error*100:.1f}%', fontsize=8)
-        
         ax3.set_xlim(0, 1)
         ax3.set_ylim(0, 1)
         ax3.axis('off')
         
         plt.tight_layout()
         plt.show()
+
+    def debug_confidence_calculation(self, cylinder_params):
+        """
+        Debug method to show detailed confidence calculation breakdown
+        """
+        print("\n" + "="*50)
+        print("🔍 CONFIDENCE CALCULATION DEBUG")
+        print("="*50)
+        
+        # Get fitting quality metrics
+        if 'inlier_mask' in cylinder_params:
+            inlier_count = np.sum(cylinder_params['inlier_mask'])
+            total_points = len(cylinder_params['all_points'])
+            inlier_ratio = inlier_count / total_points if total_points > 0 else 0
+        else:
+            inlier_ratio = 0.7
+        
+        print(f"📊 INLIER ANALYSIS:")
+        print(f"   Inliers: {inlier_count}/{total_points} = {inlier_ratio:.3f}")
+        
+        # IMPROVED: Realistic inlier ratio scoring for UR3 top-down cylinder detection
+        # In top-down view of cylinder rim, 15-25% inlier ratio is actually quite good
+        # because we're seeing the circular edge, not the full cylindrical surface
+        if inlier_ratio >= 0.25:  # ≥25% is excellent for rim detection
+            inlier_score = 1.0
+            inlier_desc = "Excellent (≥25% for rim detection)"
+        elif inlier_ratio >= 0.20:  # 20-25% is very good
+            inlier_score = 0.9 + 0.1 * (inlier_ratio - 0.20) / 0.05
+            inlier_desc = f"Very Good ({inlier_ratio*100:.1f}% for rim detection)"
+        elif inlier_ratio >= 0.15:  # 15-20% is good
+            inlier_score = 0.7 + 0.2 * (inlier_ratio - 0.15) / 0.05
+            inlier_desc = f"Good ({inlier_ratio*100:.1f}% for rim detection)"
+        elif inlier_ratio >= 0.10:  # 10-15% is fair
+            inlier_score = 0.4 + 0.3 * (inlier_ratio - 0.10) / 0.05
+            inlier_desc = f"Fair ({inlier_ratio*100:.1f}%)"
+        else:  # < 10% is poor
+            inlier_score = max(0.1, inlier_ratio / 0.10 * 0.4)
+            inlier_desc = f"Poor ({inlier_ratio*100:.1f}%)"
+        
+        print(f"   Score: {inlier_score:.3f} - {inlier_desc}")
+        print(f"   Weight: 40% → Contribution: {0.40 * inlier_score:.3f}")
+        
+        # Position stability - how well do inliers agree on center position
+        if 'inliers' in cylinder_params and len(cylinder_params['inliers']) > 10:
+            inlier_points = cylinder_params['inliers']
+            
+            # Check X,Y position consistency (most important for grasping)
+            xy_points = inlier_points[:, :2]  # Get X,Y coordinates
+            xy_center = np.mean(xy_points, axis=0)
+            xy_distances = np.linalg.norm(xy_points - xy_center, axis=1)
+            xy_std = np.std(xy_distances)
+            
+            # Check Z position consistency  
+            z_values = inlier_points[:, 2]
+            z_std = np.std(z_values)
+            
+            print(f"\n📍 POSITION STABILITY:")
+            print(f"   XY std: {xy_std*1000:.2f}mm")
+            
+            # IMPROVED: More realistic position stability scoring
+            # For cylinder rim detection, some variation is expected and acceptable
+            # Use sigmoid-like function instead of harsh exponential decay
+            
+            # XY stability: Good if std < 2mm, acceptable if < 5mm
+            if xy_std < 0.002:  # < 2mm
+                xy_stability = 1.0
+                xy_desc = "Excellent (< 2mm)"
+            elif xy_std < 0.005:  # 2-5mm
+                xy_stability = 0.8 - 0.3 * (xy_std - 0.002) / 0.003  # Linear decay 0.8->0.5
+                xy_desc = "Good (2-5mm)"
+            else:  # > 5mm
+                xy_stability = max(0.2, 0.5 * np.exp(-(xy_std - 0.005) / 0.003))
+                xy_desc = "Poor (> 5mm)"
+            
+            print(f"   XY stability: {xy_stability:.3f} - {xy_desc}")
+            
+            print(f"   Z std: {z_std*1000:.2f}mm")
+            
+            # Z stability: More lenient since top-down view has natural Z variation
+            if z_std < 0.003:  # < 3mm
+                z_stability = 1.0
+                z_desc = "Excellent (< 3mm)"
+            elif z_std < 0.008:  # 3-8mm
+                z_stability = 0.9 - 0.4 * (z_std - 0.003) / 0.005  # Linear decay 0.9->0.5
+                z_desc = "Good (3-8mm)"
+            else:  # > 8mm
+                z_stability = max(0.3, 0.5 * np.exp(-(z_std - 0.008) / 0.005))
+                z_desc = "Poor (> 8mm)"
+            
+            position_stability = (xy_stability + z_stability) / 2
+            print(f"   Combined: {position_stability:.3f}")
+            print(f"   Weight: 35% → Contribution: {0.35 * position_stability:.3f}")
+        else:
+            position_stability = 0.5  # Default if not enough inliers
+            print(f"\n📍 POSITION STABILITY: {position_stability:.3f} (default - not enough inliers)")
+        
+        # IMPROVED: More realistic point density scoring
+        # Lower threshold since we're dealing with small cylinders
+        if inlier_count >= 30:
+            point_density_score = 1.0
+            density_desc = "Excellent (≥30 inliers)"
+        elif inlier_count >= 20:
+            point_density_score = 0.8 + 0.2 * (inlier_count - 20) / 10
+            density_desc = f"Good ({inlier_count} inliers)"
+        elif inlier_count >= 10:
+            point_density_score = 0.5 + 0.3 * (inlier_count - 10) / 10
+            density_desc = f"Fair ({inlier_count} inliers)"
+        else:
+            point_density_score = max(0.2, inlier_count / 10 * 0.5)
+            density_desc = f"Poor ({inlier_count} inliers)"
+        
+        print(f"\n🔢 POINT DENSITY:")
+        print(f"   Score: {point_density_score:.3f} - {density_desc}")
+        print(f"   Weight: 15% → Contribution: {0.15 * point_density_score:.3f}")
+        
+        # IMPROVED: More lenient radius checking
+        # Since we've seen the algorithm works but radius estimation has some error
+        fitted_radius = cylinder_params['radius']
+        expected_radius = self.cylinder_radius
+        radius_error = abs(fitted_radius - expected_radius) / expected_radius
+        
+        if radius_error < 0.1:  # < 10% error
+            radius_reasonableness = 1.0
+            radius_desc = "Excellent (< 10% error)"
+        elif radius_error < 0.3:  # 10-30% error
+            radius_reasonableness = 0.9 - 0.4 * (radius_error - 0.1) / 0.2  # 0.9->0.5
+            radius_desc = f"Good ({radius_error*100:.1f}% error)"
+        elif radius_error < 0.8:  # 30-80% error
+            radius_reasonableness = 0.5 - 0.3 * (radius_error - 0.3) / 0.5  # 0.5->0.2
+            radius_desc = f"Fair ({radius_error*100:.1f}% error)"
+        else:  # > 80% error
+            radius_reasonableness = 0.2
+            radius_desc = f"Poor ({radius_error*100:.1f}% error)"
+        
+        print(f"\n📏 RADIUS CHECK:")
+        print(f"   Expected: {expected_radius*1000:.1f}mm, Fitted: {fitted_radius*1000:.1f}mm")
+        print(f"   Error: {radius_error*100:.1f}%")
+        print(f"   Score: {radius_reasonableness:.3f} - {radius_desc}")
+        print(f"   Weight: 10% → Contribution: {0.10 * radius_reasonableness:.3f}")
+        
+        # IMPROVED: Better weighting scheme optimized for UR3 rim detection
+        # 40% inlier quality + 35% position stability + 15% point density + 10% radius check
+        base_confidence = (0.40 * inlier_score + 
+                          0.35 * position_stability +
+                          0.15 * point_density_score +
+                          0.10 * radius_reasonableness)
+        
+        print(f"\n📈 BASE CONFIDENCE: {base_confidence:.3f}")
+        
+        # IMPROVED: Add bonus for very good fits
+        # If we have good inlier ratio AND good position stability, boost confidence
+        bonus = 0.0
+        if inlier_score > 0.8 and position_stability > 0.8:
+            bonus = 0.1
+            print(f"🎯 EXCELLENCE BONUS: +{bonus:.3f} (high inlier ratio + good stability)")
+        
+        # IMPROVED: Add YOLO detection confidence if available
+        yolo_bonus = 0.0
+        if 'detection_confidence' in cylinder_params:
+            yolo_confidence = cylinder_params['detection_confidence']
+            yolo_bonus = 0.05 * yolo_confidence
+            print(f"🎯 YOLO BONUS: +{yolo_bonus:.3f} (YOLO confidence: {yolo_confidence:.3f})")
+        
+        final_confidence = min(1.0, base_confidence + bonus + yolo_bonus)
+        
+        print(f"\n🏆 FINAL CONFIDENCE: {final_confidence:.3f}")
+        
+        # Quality assessment
+        if final_confidence > 0.8:
+            quality = "🟢 EXCELLENT - Ready for production use"
+        elif final_confidence > 0.6:
+            quality = "🟡 GOOD - Suitable for most applications"
+        elif final_confidence > 0.4:
+            quality = "🟠 FAIR - May work but monitor closely"
+        else:
+            quality = "🔴 POOR - Needs improvement"
+        
+        print(f"   Assessment: {quality}")
+        print("="*50)
+        
+        return final_confidence
 
 def test_6dof_pose_estimation():
     """Test the 6DOF pose estimation in camera coordinates"""
@@ -1003,7 +1401,7 @@ def test_6dof_pose_estimation():
                     confidence_threshold=0.3,
                     downsample_factor=2,
                     max_iterations=500,
-                    epsilon=0.0005,  # 0.5mm tolerance
+                    epsilon=0.0005,
                     min_inliers=20,
                     visualize=True
                 )
@@ -1086,6 +1484,93 @@ def test_point_cloud_extraction():
         estimator.disconnect()
         cv2.destroyAllWindows()
 
+def test_confidence_analysis():
+    """Test confidence calculation with detailed analysis"""
+    estimator = CylinderPoseEstimator()
+    
+    if not estimator.connect():
+        print("Failed to connect to camera")
+        return
+    
+    print("\n" + "="*60)
+    print("🔍 CONFIDENCE ANALYSIS TEST")
+    print("="*60)
+    print("This test will show detailed confidence calculation breakdown")
+    print("\nControls:")
+    print("  'c' - Analyze confidence for current detection")
+    print("  'q' - Quit")
+    
+    try:
+        while True:
+            # Get current frame for preview
+            color_image, depth_image = estimator.camera.get_frames()
+            if color_image is not None:
+                cv2.imshow('Confidence Analysis', color_image)
+            
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+            elif key == ord('c'):
+                print("\n🚀 Running confidence analysis...")
+                
+                # Run complete pipeline
+                success, pose_6dof = estimator.get_cylinder_6dof_pose(
+                    confidence_threshold=0.3,
+                    downsample_factor=2,
+                    max_iterations=500,
+                    epsilon=0.0005,
+                    min_inliers=20,
+                    visualize=False  # Don't show main visualization
+                )
+                
+                if success:
+                    # Get the cylinder params for detailed analysis
+                    fit_success, cylinder_params, fit_quality = estimator.fit_cylinder_with_ur3_optimization(
+                        confidence_threshold=0.3,
+                        downsample_factor=2,
+                        max_iterations=500,
+                        epsilon=0.0005,
+                        min_inliers=20,
+                        visualize=False
+                    )
+                    
+                    if fit_success:
+                        # Run detailed confidence analysis
+                        debug_confidence = estimator.debug_confidence_calculation(cylinder_params)
+                        actual_confidence = pose_6dof['pose_confidence']
+                        
+                        print(f"\nVerification: Debug={debug_confidence:.3f}, Actual={actual_confidence:.3f}")
+                        if abs(debug_confidence - actual_confidence) > 0.001:
+                            print("⚠️  Warning: Debug and actual confidence don't match!")
+                        else:
+                            print("✅ Debug and actual confidence match")
+                        
+                        # Show recommendations
+                        print(f"\n💡 RECOMMENDATIONS:")
+                        if actual_confidence < 0.5:
+                            print("   • Try better lighting conditions")
+                            print("   • Ensure cylinder is fully visible")
+                            print("   • Check camera focus and positioning")
+                            print("   • Consider lowering min_inliers threshold")
+                        elif actual_confidence < 0.7:
+                            print("   • Good detection, minor improvements possible")
+                            print("   • Consider fine-tuning epsilon threshold")
+                        else:
+                            print("   • Excellent detection quality!")
+                            print("   • Current setup is working well")
+                
+                else:
+                    print("\n❌ Failed to detect cylinder for confidence analysis")
+                
+                print(f"\nPress 'c' for another analysis...")
+    
+    except KeyboardInterrupt:
+        print("\nStopping...")
+    
+    finally:
+        estimator.disconnect()
+        cv2.destroyAllWindows()
+
 if __name__ == "__main__":
     # Choose which test to run
     import sys
@@ -1094,11 +1579,14 @@ if __name__ == "__main__":
             test_point_cloud_extraction()
         elif sys.argv[1] == "6dof" or sys.argv[1] == "pose":
             test_6dof_pose_estimation()
+        elif sys.argv[1] == "confidence" or sys.argv[1] == "debug":
+            test_confidence_analysis()
         else:
-            print("Usage: python test_point_cloud_extraction.py [basic|6dof|pose]")
-            print("  (no args)  - 6DOF pose estimation (default)")
-            print("  basic      - Basic point cloud extraction test")
-            print("  6dof|pose  - 6DOF pose estimation test")
+            print("Usage: python cylinder_pose_estimation.py [basic|6dof|pose|confidence|debug]")
+            print("  (no args)     - 6DOF pose estimation (default)")
+            print("  basic         - Basic point cloud extraction test")
+            print("  6dof|pose     - 6DOF pose estimation test")
+            print("  confidence|debug - Detailed confidence analysis")
     else:
         # Default to 6DOF pose estimation
         test_6dof_pose_estimation()
