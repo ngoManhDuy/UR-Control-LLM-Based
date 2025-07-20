@@ -268,45 +268,6 @@ class URRobotControl:
             print(f"Stop error: {e}")
             return False
     
-    def freedrive_mode(self, enable=True):
-        """
-        Enable or disable freedrive mode.
-        
-        Args:
-            enable (bool): True to enable freedrive mode, False to disable
-            
-        Returns:
-            bool: True if mode change is successful
-        """
-        try:
-            if enable:
-                self.ur_script.freedrive_mode()
-            else:
-                self.ur_script.end_freedrive_mode()
-            return True
-        except Exception as e:
-            print(f"Freedrive mode error: {e}")
-            return False
-    
-    def teach_mode(self, enable=True):
-        """
-        Enable or disable teach mode.
-        
-        Args:
-            enable (bool): True to enable teach mode, False to disable
-            
-        Returns:
-            bool: True if mode change is successful
-        """
-        try:
-            if enable:
-                self.ur_script.teach_mode()
-            else:
-                self.ur_script.end_teach_mode()
-            return True
-        except Exception as e:
-            print(f"Teach mode error: {e}")
-            return False
     
     def get_tcp_force(self):
         """

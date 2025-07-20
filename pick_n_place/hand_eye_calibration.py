@@ -7,8 +7,143 @@ import sys
 import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from pick_n_place.cylinder_pose_estimation import CameraPoseEstimator
+from pick_n_place.camera import RealSenseCamera
 from URRobotControl import URRobotControl
+
+class CameraPoseEstimator:
+    def __init__(self, marker_size=0.1, marker_id=7):
+        """
+        Initialize the camera pose estimator for ArUco marker detection
+        
+        Args:
+            marker_size (float): Size of the ArUco marker in meters
+            marker_id (int): ID of the ArUco marker to detect
+        """
+        self.camera = RealSenseCamera()
+        self.marker_size = marker_size
+        self.marker_id = marker_id
+        
+        # ArUco dictionary and parameters - handle different OpenCV versions
+        try:
+            # OpenCV 4.7+
+            self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+            self.aruco_params = cv2.aruco.DetectorParameters()
+        except AttributeError:
+            try:
+                # OpenCV 4.0-4.6
+                self.aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_6X6_250)
+                self.aruco_params = cv2.aruco.DetectorParameters_create()
+            except AttributeError:
+                # Very old OpenCV versions
+                raise ImportError("OpenCV version too old for ArUco support")
+                
+    def connect(self):
+        """Connect to the camera"""
+        return self.camera.connect()
+    
+    def disconnect(self):
+        """Disconnect from the camera"""
+        self.camera.disconnect()
+    
+    def detect_marker_pose(self):
+        """
+        Detect ArUco marker and estimate its pose
+        
+        Returns:
+            tuple: (success, rvec, tvec, image)
+                - success: Boolean indicating if marker was detected
+                - rvec: Rotation vector of the marker relative to camera
+                - tvec: Translation vector of the marker relative to camera
+                - image: Current camera image with marker detection drawn
+        """
+        # Get camera frame
+        color_image, _ = self.camera.get_frames()
+        if color_image is None:
+            return False, None, None, None
+        
+        # Convert to grayscale for ArUco detection
+        gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
+        
+        # Detect ArUco markers - handle different OpenCV versions
+        try:
+            # OpenCV 4.7+
+            detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+            corners, ids, _ = detector.detectMarkers(gray)
+        except AttributeError:
+            # OpenCV 4.0-4.6
+            corners, ids, _ = cv2.aruco.detectMarkers(gray, self.aruco_dict, parameters=self.aruco_params)
+        
+        # Check if our target marker was detected
+        if ids is not None and self.marker_id in ids:
+            # Find the index of our target marker
+            marker_index = np.where(ids == self.marker_id)[0][0]
+            marker_corners = corners[marker_index]
+            
+            # Define 3D object points for the ArUco marker
+            # ArUco markers are defined with origin at center, with corners at:
+            # Top-left, Top-right, Bottom-right, Bottom-left
+            half_size = self.marker_size / 2.0
+            object_points = np.array([
+                [-half_size, -half_size, 0],  # Top-left
+                [ half_size, -half_size, 0],  # Top-right
+                [ half_size,  half_size, 0],  # Bottom-right
+                [-half_size,  half_size, 0]   # Bottom-left
+            ], dtype=np.float32)
+            
+            # Get 2D image points (corners of detected marker)
+            image_points = marker_corners[0].astype(np.float32)
+            
+            # Solve PnP to get pose
+            success, rvec, tvec = cv2.solvePnP(
+                object_points, image_points,
+                self.camera.camera_matrix, self.camera.dist_coeffs
+            )
+            
+            if not success:
+                return False, None, None, color_image
+            
+            # Draw detected marker and pose axis
+            image_with_detection = color_image.copy()
+            
+            # Draw markers
+            cv2.aruco.drawDetectedMarkers(image_with_detection, corners, ids)
+            
+            # Draw coordinate axis
+            try:
+                cv2.drawFrameAxes(image_with_detection, self.camera.camera_matrix, 
+                                self.camera.dist_coeffs, rvec, tvec, self.marker_size * 0.5)
+            except AttributeError:
+                # Fallback for older OpenCV versions - project and draw manually
+                axis_points = np.array([
+                    [0, 0, 0],                           # Origin
+                    [self.marker_size * 0.5, 0, 0],      # X-axis (red)
+                    [0, self.marker_size * 0.5, 0],      # Y-axis (green)
+                    [0, 0, -self.marker_size * 0.5]      # Z-axis (blue)
+                ], dtype=np.float32)
+                
+                projected_points, _ = cv2.projectPoints(
+                    axis_points, rvec, tvec, 
+                    self.camera.camera_matrix, self.camera.dist_coeffs
+                )
+                
+                projected_points = np.int32(projected_points).reshape(-1, 2)
+                
+                # Draw axes
+                cv2.arrowedLine(image_with_detection, 
+                               tuple(projected_points[0]), tuple(projected_points[1]), 
+                               (0, 0, 255), 3)  # X-axis in red
+                cv2.arrowedLine(image_with_detection, 
+                               tuple(projected_points[0]), tuple(projected_points[2]), 
+                               (0, 255, 0), 3)  # Y-axis in green
+                cv2.arrowedLine(image_with_detection, 
+                               tuple(projected_points[0]), tuple(projected_points[3]), 
+                               (255, 0, 0), 3)  # Z-axis in blue
+            
+            return True, rvec, tvec, image_with_detection
+        
+        else:
+            # No marker detected
+            return False, None, None, color_image
 
 class HandEyeCalibrator:
     def __init__(self, robot_ip, marker_size=0.1):

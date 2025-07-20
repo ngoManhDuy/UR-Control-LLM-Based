@@ -41,9 +41,9 @@ class RealTimePoseRobotCoordinates:
         """
         # Get 6D pose in camera frame
         success, pose_6dof = self.estimator.get_cylinder_6dof_pose(
-            confidence_threshold=0.8,
+            confidence_threshold=0.80,
             downsample_factor=2,
-            max_iterations=500,
+            max_iterations=1000,
             epsilon=0.0005,
             min_inliers=20,
             visualize=False
@@ -121,7 +121,6 @@ class RealTimePoseRobotCoordinates:
         y_offset = 50
         if pose is not None:
             x, y, z = pose['position']
-            rx, ry, rz = pose['rotation_euler']
             confidence = pose['confidence']
             cv2.putText(image, "CAMERA 6D POSE:", (10, y_offset), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
@@ -133,18 +132,6 @@ class RealTimePoseRobotCoordinates:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             y_offset += 25
             cv2.putText(image, f"Z: {z:+.4f}m", (10, y_offset), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            y_offset += 35
-            cv2.putText(image, "ROTATION:", (10, y_offset), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-            y_offset += 25
-            cv2.putText(image, f"RX: {np.degrees(rx):+.1f}deg", (10, y_offset), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            y_offset += 25
-            cv2.putText(image, f"RY: {np.degrees(ry):+.1f}deg", (10, y_offset), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            y_offset += 25
-            cv2.putText(image, f"RZ: {np.degrees(rz):+.1f}deg", (10, y_offset), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         # Draw robot pose info
         y_offset += 40

@@ -23,7 +23,7 @@ except ImportError as e:
     print(f"Error importing ultralytics: {e}")
     raise
 
-from camera import RealSenseCamera
+from pick_n_place.camera import RealSenseCamera
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
