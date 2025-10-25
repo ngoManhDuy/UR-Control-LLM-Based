@@ -15,3 +15,7 @@ best.pt
 hand_eye_calibration_best.json
 calib_results/
 
+.gitignore 
+.jpg
+.wav 
+
